@@ -2,6 +2,7 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db.dependencies import get_db
 
@@ -10,6 +11,8 @@ app = FastAPI(
     title=settings.app_name,
     debug=settings.app_debug,
 )
+
+app.include_router(api_router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/health")
