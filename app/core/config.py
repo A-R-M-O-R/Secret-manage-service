@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    master_key_file: str = "/run/secrets/sms_master_key"
+    encryption_key_version: str = "local-v1"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
