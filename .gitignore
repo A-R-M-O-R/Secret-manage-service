@@ -22,3 +22,6 @@ secrets/
 
 # Docker local overrides
 docker-compose.override.yml
+
+# Local TLS certificates
+nginx/certs/
