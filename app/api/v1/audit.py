@@ -1,9 +1,12 @@
+import uuid
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.v1.dependencies import require_roles
+from app.core.datetime import ensure_aware_utc
 from app.db.dependencies import get_db
 from app.repositories.audit import list_audit_logs
 from app.schemas.audit import AuditLogResponse
@@ -11,6 +14,16 @@ from app.services.auth_service import AuthenticatedPrincipal
 
 
 router = APIRouter(prefix="/audit", tags=["audit"])
+
+
+def normalize_query_datetime(value: datetime | None, field_name: str) -> datetime | None:
+    try:
+        return ensure_aware_utc(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field_name} must be timezone-aware",
+        ) from exc
 
 
 @router.get("", response_model=list[AuditLogResponse])
@@ -21,8 +34,25 @@ def list_audit_logs_endpoint(
         Depends(require_roles("admin", "auditor")),
     ],
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    actor_id: uuid.UUID | None = None,
+    secret_id: uuid.UUID | None = None,
+    action: str | None = None,
+    status: str | None = None,
+    request_id: str | None = None,
+    created_from: datetime | None = None,
+    created_to: datetime | None = None,
 ) -> list[AuditLogResponse]:
-    audit_logs = list_audit_logs(db=db, limit=limit)
+    audit_logs = list_audit_logs(
+        db=db,
+        limit=limit,
+        actor_id=actor_id,
+        secret_id=secret_id,
+        action=action,
+        status=status,
+        request_id=request_id,
+        created_from=normalize_query_datetime(created_from, "created_from"),
+        created_to=normalize_query_datetime(created_to, "created_to"),
+    )
 
     return [
         AuditLogResponse(

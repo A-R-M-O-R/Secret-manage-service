@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.api.v1.dependencies import get_current_principal
@@ -17,12 +17,14 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @router.post("/login", response_model=TokenResponse)
 def login(
     payload: LoginRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
 ) -> TokenResponse:
     principal = authenticate_user(
         db=db,
         username=payload.username,
         password=payload.password,
+        request=request,
     )
 
     if principal is None:
@@ -34,7 +36,6 @@ def login(
     access_token = create_access_token(
         principal_id=principal.id,
         principal_type=principal.principal_type,
-        roles=principal.roles,
     )
 
     return TokenResponse(

@@ -1,10 +1,16 @@
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import Request
 from sqlalchemy.orm import Session
 
+from app.core.audit_actions import AuditAction, AuditStatus
 from app.core.config import settings
-from app.core.encryption import decrypt_secret_value, encrypt_secret_value
+from app.core.datetime import ensure_aware_utc, utc_now
+from app.core.encryption import (
+    DecryptionError,
+    decrypt_secret_value,
+    encrypt_secret_value,
+)
 from app.models.secrets import AccessPolicy, Secret, SecretVersion
 from app.repositories.identity import get_principal_by_id
 from app.repositories.secrets import (
@@ -18,7 +24,12 @@ from app.services.audit_service import write_audit_event
 from app.services.auth_service import AuthenticatedPrincipal
 
 
-OWNER_CAPABILITIES = ["read", "update", "delete", "rotate", "manage_policy"]
+OWNER_CAPABILITIES = [
+    "read",
+    "delete",
+    "rotate",
+    "manage_policy",
+]
 
 
 class SecretAlreadyExistsError(Exception):
@@ -30,6 +41,14 @@ class SecretNotFoundError(Exception):
 
 
 class SecretAccessDeniedError(Exception):
+    pass
+
+
+class SecretExpiredError(Exception):
+    pass
+
+
+class SecretDecryptionFailedError(Exception):
     pass
 
 
@@ -46,14 +65,16 @@ def create_secret(
     current_principal: AuthenticatedPrincipal,
     request: Request | None = None,
 ) -> Secret:
+    expires_at = ensure_aware_utc(expires_at)
+
     existing_secret = get_secret_by_path(db, path)
 
     if existing_secret is not None:
         write_audit_event(
             db=db,
             actor=current_principal,
-            action="secret.created",
-            status="denied",
+            action=AuditAction.SECRET_CREATED,
+            status=AuditStatus.DENIED,
             request=request,
         )
         db.commit()
@@ -92,8 +113,8 @@ def create_secret(
     write_audit_event(
         db=db,
         actor=current_principal,
-        action="secret.created",
-        status="success",
+        action=AuditAction.SECRET_CREATED,
+        status=AuditStatus.SUCCESS,
         secret_id=secret.id,
         request=request,
     )
@@ -119,8 +140,8 @@ def read_secret_value(
         write_audit_event(
             db=db,
             actor=current_principal,
-            action="secret.read",
-            status="denied",
+            action=AuditAction.SECRET_READ,
+            status=AuditStatus.DENIED,
             secret_id=secret.id,
             request=request,
         )
@@ -132,28 +153,37 @@ def read_secret_value(
     if secret_version is None:
         raise SecretNotFoundError
 
-    if secret_version.expires_at is not None:
-        now = datetime.now(timezone.utc)
+    if secret_version.expires_at is not None and secret_version.expires_at <= utc_now():
+        write_audit_event(
+            db=db,
+            actor=current_principal,
+            action=AuditAction.SECRET_READ,
+            status=AuditStatus.DENIED,
+            secret_id=secret.id,
+            request=request,
+        )
+        db.commit()
+        raise SecretExpiredError
 
-        if secret_version.expires_at <= now:
-            write_audit_event(
-                db=db,
-                actor=current_principal,
-                action="secret.read",
-                status="denied",
-                secret_id=secret.id,
-                request=request,
-            )
-            db.commit()
-            raise SecretAccessDeniedError
-
-    plaintext = decrypt_secret_value(secret_version.ciphertext)
+    try:
+        plaintext = decrypt_secret_value(secret_version.ciphertext)
+    except DecryptionError as exc:
+        write_audit_event(
+            db=db,
+            actor=current_principal,
+            action=AuditAction.SECRET_READ,
+            status=AuditStatus.FAILED,
+            secret_id=secret.id,
+            request=request,
+        )
+        db.commit()
+        raise SecretDecryptionFailedError from exc
 
     write_audit_event(
         db=db,
         actor=current_principal,
-        action="secret.read",
-        status="success",
+        action=AuditAction.SECRET_READ,
+        status=AuditStatus.SUCCESS,
         secret_id=secret.id,
         request=request,
     )
@@ -171,6 +201,8 @@ def rotate_secret_value(
     current_principal: AuthenticatedPrincipal,
     request: Request | None = None,
 ) -> Secret:
+    expires_at = ensure_aware_utc(expires_at)
+
     secret = get_secret_by_path(db, path)
 
     if secret is None:
@@ -180,8 +212,8 @@ def rotate_secret_value(
         write_audit_event(
             db=db,
             actor=current_principal,
-            action="secret.rotated",
-            status="denied",
+            action=AuditAction.SECRET_ROTATED,
+            status=AuditStatus.DENIED,
             secret_id=secret.id,
             request=request,
         )
@@ -200,7 +232,7 @@ def rotate_secret_value(
     )
 
     secret.current_version = next_version
-    secret.updated_at = datetime.now(timezone.utc)
+    secret.updated_at = utc_now()
 
     db.add(secret_version)
     db.add(secret)
@@ -208,8 +240,8 @@ def rotate_secret_value(
     write_audit_event(
         db=db,
         actor=current_principal,
-        action="secret.rotated",
-        status="success",
+        action=AuditAction.SECRET_ROTATED,
+        status=AuditStatus.SUCCESS,
         secret_id=secret.id,
         request=request,
     )
@@ -235,8 +267,8 @@ def delete_secret(
         write_audit_event(
             db=db,
             actor=current_principal,
-            action="secret.deleted",
-            status="denied",
+            action=AuditAction.SECRET_DELETED,
+            status=AuditStatus.DENIED,
             secret_id=secret.id,
             request=request,
         )
@@ -244,14 +276,15 @@ def delete_secret(
         raise SecretAccessDeniedError
 
     secret.is_deleted = True
-    secret.updated_at = datetime.now(timezone.utc)
+    secret.updated_at = utc_now()
+
     db.add(secret)
 
     write_audit_event(
         db=db,
         actor=current_principal,
-        action="secret.deleted",
-        status="success",
+        action=AuditAction.SECRET_DELETED,
+        status=AuditStatus.SUCCESS,
         secret_id=secret.id,
         request=request,
     )
@@ -281,8 +314,8 @@ def grant_secret_access(
         write_audit_event(
             db=db,
             actor=current_principal,
-            action="policy.created",
-            status="denied",
+            action=AuditAction.POLICY_CREATED,
+            status=AuditStatus.DENIED,
             secret_id=secret.id,
             request=request,
         )
@@ -305,8 +338,8 @@ def grant_secret_access(
     write_audit_event(
         db=db,
         actor=current_principal,
-        action="policy.created",
-        status="success",
+        action=AuditAction.POLICY_CREATED,
+        status=AuditStatus.SUCCESS,
         secret_id=secret.id,
         request=request,
     )
