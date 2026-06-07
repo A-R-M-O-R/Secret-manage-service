@@ -1,12 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.v1.dependencies import get_current_principal, require_roles
 from app.db.dependencies import get_db
 from app.repositories.secrets import list_accessible_secrets
 from app.schemas.secret import (
+    SECRET_PATH_PATTERN,
     SecretCreateRequest,
     SecretMetadataResponse,
     SecretRotateRequest,
@@ -16,6 +17,8 @@ from app.services.auth_service import AuthenticatedPrincipal
 from app.services.secret_service import (
     SecretAccessDeniedError,
     SecretAlreadyExistsError,
+    SecretDecryptionFailedError,
+    SecretExpiredError,
     SecretNotFoundError,
     create_secret,
     delete_secret,
@@ -25,6 +28,16 @@ from app.services.secret_service import (
 
 
 router = APIRouter(prefix="/secrets", tags=["secrets"])
+
+
+SecretPathParam = Annotated[
+    str,
+    Path(
+        min_length=3,
+        max_length=512,
+        pattern=SECRET_PATH_PATTERN,
+    ),
+]
 
 
 def to_secret_metadata_response(secret) -> SecretMetadataResponse:
@@ -98,7 +111,7 @@ def list_secrets_endpoint(
     response_model=SecretMetadataResponse,
 )
 def rotate_secret_endpoint(
-    secret_path: str,
+    secret_path: SecretPathParam,
     payload: SecretRotateRequest,
     request: Request,
     db: Annotated[Session, Depends(get_db)],
@@ -132,7 +145,7 @@ def rotate_secret_endpoint(
 
 @router.get("/{secret_path:path}", response_model=SecretValueResponse)
 def read_secret_endpoint(
-    secret_path: str,
+    secret_path: SecretPathParam,
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_principal: Annotated[
@@ -157,6 +170,16 @@ def read_secret_endpoint(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Insufficient secret permissions",
         )
+    except SecretExpiredError:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Secret version has expired",
+        )
+    except SecretDecryptionFailedError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Secret cannot be decrypted",
+        )
 
     return SecretValueResponse(
         id=secret.id,
@@ -173,7 +196,7 @@ def read_secret_endpoint(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def delete_secret_endpoint(
-    secret_path: str,
+    secret_path: SecretPathParam,
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_principal: Annotated[
