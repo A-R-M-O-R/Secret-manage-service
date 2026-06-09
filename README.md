@@ -68,6 +68,7 @@ nginx/certs/nginx.key
 
 ```bash
 docker compose build
+docker compose run --rm api sh -lc "whoami && ls -l alembic.ini && head -5 alembic.ini && python -c 'import app; print(\"app import ok\")'"
 docker compose up -d postgres
 docker compose run --rm api alembic upgrade head
 docker compose run --rm api alembic current
